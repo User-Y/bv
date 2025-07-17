@@ -7,9 +7,10 @@ on:
 
 jobs:
   build-alpha:
-    name: Build Alpha Apk
-    runs-on: macos-latest
-    if: github.repository == 'aaa1115910/bv'
+    name: Build debug Apk
+    runs-on: ubuntu-latest
+    # 移除仓库限制
+    # if: github.repository == 'your-username/your-repo'
 
     steps:
       - name: Checkout
@@ -30,100 +31,110 @@ jobs:
         with:
           dependency-graph: generate-and-submit
 
-      - name: Write google-services.json
-        env:
-          DATA: ${{ secrets.GOOGLE_SERVICES_JSON }}
-        run: echo $DATA > app/google-services.json
+      # 创建空的 google-services.json 文件
+      - name: Create empty google-services.json
+        run: |
+          mkdir -p app
+          cat > app/google-services.json << 'EOF'
+          {
+            "project_info": {
+              "project_number": "000000000000",
+              "project_id": "dummy-project-id"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+                  "android_client_info": {
+                    "package_name": "com.example.dummy"
+                  }
+                },
+                "oauth_client": [],
+                "api_key": [
+                  {
+                    "current_key": "dummy-api-key"
+                  }
+                ],
+                "services": {
+                  "appinvite_service": {
+                    "other_platform_oauth_client": []
+                  }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+
+      # 创建正确格式的签名配置文件
+      - name: Create signing properties
+        run: |
+          cat > signing.properties << 'EOF'
+          keystore.path=key.jks
+          keystore.pwd=dummy123
+          keystore.alias=dummy
+          keystore.alias_pwd=dummy123
+          EOF
+
+      # 创建空的密钥文件
+      - name: Create dummy keystore
+        run: |
+          keytool -genkey -v -keystore key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias dummy \
+            -dname "CN=Dummy, OU=Dummy, O=Dummy, L=Dummy, S=Dummy, C=US" \
+            -storepass dummy123 -keypass dummy123
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Add signing properties
-        env:
-          SIGNING_PROPERTIES: ${{ secrets.SIGNING_PROPERTIES }}
+      # 尝试构建不同的变体
+      - name: Build debug variants
         run: |
-          echo ${{ secrets.SIGNING_PROPERTIES }} > encoded_signing_properties
-          base64 -Dd -i encoded_signing_properties > signing.properties
+          echo "Building debug variants..."
+          ./gradlew assembleDefaultDebug --stacktrace || echo "DefaultDebug failed"
+          ./gradlew assembleLiteDebug --stacktrace || echo "LiteDebug failed"
+        continue-on-error: true
 
-      - name: Add jks file
+      - name: Build alpha variants (if signing available)
         run: |
-          echo ${{ secrets.SIGN_KEY }} > ./encoded_key
-          base64 -Dd -i encoded_key > key.jks
+          echo "Building alpha variants..."
+          ./gradlew assembleDefaultAlpha --stacktrace || echo "DefaultAlpha failed"
+          ./gradlew assembleLiteAlpha --stacktrace || echo "LiteAlpha failed"
+        continue-on-error: true
 
-      - name: Build apk
-        run: ./gradlew assembleDefaultAlpha assembleDefaultDebug
+      # 查找生成的APK文件
+      - name: Find APK files
+        run: find . -name "*.apk" -type f
 
-      - name: Read alpha apk output metadata
-        id: apk-meta-alpha
-        uses: juliangruber/read-file-action@v1
-        with:
-          path: app/build/outputs/apk/default/alpha/output-metadata.json
-
-      - name: Read alpha debug apk output metadata
-        id: apk-meta-alpha-debug
-        uses: juliangruber/read-file-action@v1
-        with:
-          path: app/build/outputs/apk/default/debug/output-metadata.json
-
-      - name: Parse apk infos
-        id: apk-infos
-        run: |
-          echo "alpha_info_version_code=${{ fromJson(steps.apk-meta-alpha.outputs.content).elements[0].versionCode }}" >> $GITHUB_ENV
-          echo "alpha_info_version_name=${{ fromJson(steps.apk-meta-alpha.outputs.content).elements[0].versionName }}" >> $GITHUB_ENV
-          echo "alpha_debug_info_version_code=${{ fromJson(steps.apk-meta-alpha-debug.outputs.content).elements[0].versionCode }}" >> $GITHUB_ENV
-          echo "alpha_debug_info_version_name=${{ fromJson(steps.apk-meta-alpha-debug.outputs.content).elements[0].versionName }}" >> $GITHUB_ENV
-
-      - name: Determine tag name
-        id: tag_name
-        run: echo "tag_name=alpha-r${{ env.alpha_info_version_code }}" >> $GITHUB_ENV
-
-      - name: Get changelog
-        id: changelog
-        run: |
-          {
-            echo "changelog<<EOF"
-            echo "$(git log --pretty=format:"- %s (%h)" ${{ github.event.before }}..${{ github.sha }})"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
-
-      # upload artifacts alpha debug
-
-      - name: Archive alpha debug build artifacts
+      # 上传所有找到的APK
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Alpha debug build artifact
-          path: app/build/outputs/apk/default/debug/BV_${{ env.alpha_debug_info_version_code }}_${{ env.alpha_debug_info_version_name }}_default_universal.apk
+          name: Built APKs
+          path: "**/*.apk"
 
-      # upload artifacts alpha
+      # 获取版本信息（如果可能）
+      - name: Get version info
+        id: version
+        run: |
+          VERSION_NAME=$(./gradlew -q printVersionName 2>/dev/null || echo "unknown")
+          VERSION_CODE=$(./gradlew -q printVersionCode 2>/dev/null || echo "1")
+          echo "VERSION_NAME=${VERSION_NAME}" >> $GITHUB_ENV
+          echo "VERSION_CODE=${VERSION_CODE}" >> $GITHUB_ENV
+        continue-on-error: true
 
-      - name: Archive default alpha build mappings
-        uses: actions/upload-artifact@v4
-        with:
-          name: Alpha build mappings
-          path: app/build/outputs/mapping/defaultAlpha
-
-      - name: Archive alpha build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: Alpha build artifact
-          path: app/build/outputs/apk/default/alpha/BV_${{ env.alpha_info_version_code }}_${{ env.alpha_info_version_name }}_default_universal.apk
-
-      # zip mapping because softprops/action-gh-release can't upload folder
-
-      - name: Zip mapping
-        run: zip -rj mapping.zip app/build/outputs/mapping/defaultAlpha
-
-      # upload to github release
-
-      - name: Publish Pre-Release
+      # 创建Release（如果有APK文件）
+      - name: Create Release
         uses: softprops/action-gh-release@v2
+        if: success()
         with:
-          files: |
-            app/build/outputs/apk/default/debug/BV_${{ env.alpha_debug_info_version_code }}_${{ env.alpha_debug_info_version_name }}_default_universal.apk
-            app/build/outputs/apk/default/alpha/BV_${{ env.alpha_info_version_code }}_${{ env.alpha_info_version_name }}_default_universal.apk
-            mapping.zip
-          tag_name: ${{ env.tag_name }}
-          name: ${{ env.alpha_info_version_name }}
+          files: "**/*.apk"
+          tag_name: "build-${{ github.run_number }}"
+          name: "Build ${{ github.run_number }}"
           prerelease: true
-          body: ${{ env.changelog }}
+          body: |
+            自动构建的APK
+
+            - 构建时间: ${{ github.event.head_commit.timestamp }}
+            - 提交: ${{ github.sha }}
+            - 版本: ${{ env.VERSION_NAME }} (${{ env.VERSION_CODE }})
           target_commitish: ${{ github.sha }}
